@@ -5,7 +5,6 @@ import pygame
 import sys
 import math
 import random
-from collections import deque
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -19,6 +18,8 @@ HEIGHT = CELL * ROWS + 40  # extra space for HUD
 FPS = 60
 PAC_SPEED = 2
 GHOST_SPEED = 1.8
+GHOST_RESPAWN_TIME = 300  # frames (~5 seconds)
+DEATH_ANIM_FRAMES = 60
 
 BLACK  = (0, 0, 0)
 YELLOW = (255, 255, 0)
@@ -65,14 +66,26 @@ def cell_center(col, row):
 
 
 def pixel_to_cell(x, y):
-    return (x - CELL // 2) // CELL, (y - 40 - CELL // 2) // CELL
+    c = int((x - CELL // 2) // CELL)
+    r = int((y - 40 - CELL // 2) // CELL)
+    return c, r
 
 
 def is_passable(maze, col, row):
     if row < 0 or row >= ROWS:
         return False
-    c = col % COLS  # wrap horizontally for tunnel
+    c = col % COLS
+    if c < 0:
+        c += COLS
     return maze[row][c] != 1
+
+
+def wrap_x(x):
+    if x < 0:
+        return x + COLS * CELL
+    if x >= COLS * CELL:
+        return x - COLS * CELL
+    return x
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +94,7 @@ def is_passable(maze, col, row):
 
 class PacMan:
     def __init__(self, col, row):
+        self.start_col, self.start_row = col, row
         self.sx, self.sy = cell_center(col, row)
         self.x, self.y = float(self.sx), float(self.sy)
         self.col, self.row = col, row
@@ -89,12 +103,15 @@ class PacMan:
         self.mouth_angle = 0
         self.mouth_open = True
         self.alive = True
+        self.death_frame = 0
 
     def reset(self):
         self.x, self.y = float(self.sx), float(self.sy)
+        self.col, self.row = self.start_col, self.start_row
         self.direction = (0, 0)
         self.next_dir = (0, 0)
         self.alive = True
+        self.death_frame = 0
 
     def set_direction(self, dx, dy):
         self.next_dir = (dx, dy)
@@ -103,7 +120,6 @@ class PacMan:
         if not self.alive:
             return
 
-        # animate mouth
         if self.mouth_open:
             self.mouth_angle += 4
             if self.mouth_angle >= 45:
@@ -116,7 +132,6 @@ class PacMan:
         cx, cy = cell_center(self.col, self.row)
         dist_to_center = math.hypot(self.x - cx, self.y - cy)
 
-        # try switching to queued direction at cell center
         if dist_to_center < PAC_SPEED + 0.5 and self.next_dir != (0, 0):
             nc = self.col + self.next_dir[0]
             nr = self.row + self.next_dir[1]
@@ -137,19 +152,36 @@ class PacMan:
 
         self.x += dx * PAC_SPEED
         self.y += dy * PAC_SPEED
-
-        # wrap tunnel
-        if self.x < 0:
-            self.x += COLS * CELL
-        elif self.x >= COLS * CELL:
-            self.x -= COLS * CELL
+        self.x = wrap_x(self.x)
 
         self.col, self.row = pixel_to_cell(self.x, self.y)
+        # clamp col into valid range after wrap
+        if self.col < 0:
+            self.col += COLS
+        elif self.col >= COLS:
+            self.col -= COLS
 
-    def draw(self, screen):
-        if not self.alive:
-            return
+    def draw(self, screen, death_frame=0):
         r = CELL // 2 - 2
+        ix, iy = int(self.x), int(self.y)
+
+        if not self.alive:
+            # death animation: pac-man shrinks into nothing
+            progress = death_frame / DEATH_ANIM_FRAMES
+            angle = int(360 * progress)
+            if angle >= 360:
+                return
+            half = max(1, 180 - angle)
+            pygame.draw.circle(screen, YELLOW, (ix, iy), r)
+            pygame.draw.polygon(screen, BLACK, [
+                (ix, iy),
+                (ix + int(r * math.cos(math.radians(0 - half))),
+                 iy - int(r * math.sin(math.radians(0 - half)))),
+                (ix + int(r * math.cos(math.radians(0 + half))),
+                 iy - int(r * math.sin(math.radians(0 + half)))),
+            ])
+            return
+
         if self.direction == (1, 0):
             start = 0
         elif self.direction == (-1, 0):
@@ -161,13 +193,13 @@ class PacMan:
         else:
             start = 0
         mouth = max(self.mouth_angle, 1)
-        pygame.draw.circle(screen, YELLOW, (int(self.x), int(self.y)), r)
+        pygame.draw.circle(screen, YELLOW, (ix, iy), r)
         pygame.draw.polygon(screen, BLACK, [
-            (int(self.x), int(self.y)),
-            (int(self.x + r * math.cos(math.radians(start - mouth))),
-             int(self.y - r * math.sin(math.radians(start - mouth)))),
-            (int(self.x + r * math.cos(math.radians(start + mouth))),
-             int(self.y - r * math.sin(math.radians(start + mouth)))),
+            (ix, iy),
+            (ix + int(r * math.cos(math.radians(start - mouth))),
+             iy - int(r * math.sin(math.radians(start - mouth)))),
+            (ix + int(r * math.cos(math.radians(start + mouth))),
+             iy - int(r * math.sin(math.radians(start + mouth)))),
         ])
 
 
@@ -184,21 +216,37 @@ class Ghost:
         self.x, self.y = float(self.sx), float(self.sy)
         self.col, self.row = col, row
         self.color = GHOST_COLORS[color_idx % len(GHOST_COLORS)]
-        self.direction = random.choice([(1,0),(-1,0),(0,1),(0,-1)])
+        self.color_idx = color_idx
+        self.direction = (0, 0)
         self.scared = False
         self.scared_timer = 0
         self.eaten = False
+        self.respawn_timer = 0
 
     def reset(self):
         self.x, self.y = float(self.sx), float(self.sy)
         self.col, self.row = self.start_col, self.start_row
-        self.direction = random.choice([(1,0),(-1,0),(0,1),(0,-1)])
+        self.direction = (0, -1)
         self.scared = False
         self.scared_timer = 0
         self.eaten = False
+        self.respawn_timer = 0
+
+    def respawn(self):
+        self.x, self.y = float(self.sx), float(self.sy)
+        self.col, self.row = self.start_col, self.start_row
+        self.direction = (0, -1)
+        self.scared = False
+        self.scared_timer = 0
+        self.eaten = False
+        self.respawn_timer = 0
 
     def update(self, maze, pacman):
+        # handle respawn countdown
         if self.eaten:
+            self.respawn_timer -= 1
+            if self.respawn_timer <= 0:
+                self.respawn()
             return
 
         if self.scared:
@@ -207,33 +255,55 @@ class Ghost:
                 self.scared = False
 
         speed = GHOST_SPEED * 0.6 if self.scared else GHOST_SPEED
+
+        # snap to cell center and choose direction when close enough
         cx, cy = cell_center(self.col, self.row)
         dist_to_center = math.hypot(self.x - cx, self.y - cy)
 
         if dist_to_center < speed + 0.5:
             self.x, self.y = float(cx), float(cy)
+            self.col, self.row = pixel_to_cell(self.x, self.y)
+            if self.col < 0:
+                self.col += COLS
+            elif self.col >= COLS:
+                self.col -= COLS
             self._choose_direction(maze, pacman)
 
+        # validate current direction before moving
         dx, dy = self.direction
-        nc = self.col + dx
-        nr = self.row + dy
-        if not is_passable(maze, nc, nr) and dist_to_center < speed + 0.5:
+        if dx == 0 and dy == 0:
             self._choose_direction(maze, pacman)
             dx, dy = self.direction
+            if dx == 0 and dy == 0:
+                return
+
+        nc = self.col + dx
+        nr = self.row + dy
+        if not is_passable(maze, nc, nr):
+            # re-snap and re-choose
+            self.x, self.y = float(cx), float(cy)
+            self._choose_direction(maze, pacman)
+            dx, dy = self.direction
+            if dx == 0 and dy == 0:
+                return
+            nc = self.col + dx
+            nr = self.row + dy
+            if not is_passable(maze, nc, nr):
+                return  # truly stuck, wait
 
         self.x += dx * speed
         self.y += dy * speed
-
-        if self.x < 0:
-            self.x += COLS * CELL
-        elif self.x >= COLS * CELL:
-            self.x -= COLS * CELL
+        self.x = wrap_x(self.x)
 
         self.col, self.row = pixel_to_cell(self.x, self.y)
+        if self.col < 0:
+            self.col += COLS
+        elif self.col >= COLS:
+            self.col -= COLS
 
     def _choose_direction(self, maze, pacman):
         dx, dy = self.direction
-        opposite = (-dx, -dy)
+        opposite = (-dx, -dy) if (dx, dy) != (0, 0) else None
         options = []
         for d in [(1,0),(-1,0),(0,1),(0,-1)]:
             if d == opposite:
@@ -244,16 +314,22 @@ class Ghost:
                 options.append(d)
 
         if not options:
-            if is_passable(maze, self.col + opposite[0], self.row + opposite[1]):
+            if opposite and is_passable(maze, self.col + opposite[0], self.row + opposite[1]):
                 options = [opposite]
             else:
-                return
+                # try all 4 directions as last resort
+                for d in [(1,0),(-1,0),(0,1),(0,-1)]:
+                    nc = self.col + d[0]
+                    nr = self.row + d[1]
+                    if is_passable(maze, nc, nr):
+                        options.append(d)
+                if not options:
+                    return
 
         if self.scared:
             self.direction = random.choice(options)
             return
 
-        # chase: pick direction that minimises distance to pac-man
         best = options[0]
         best_dist = float('inf')
         for d in options:
@@ -261,7 +337,6 @@ class Ghost:
             nr = self.row + d[1]
             nccx, nccy = cell_center(nc, nr)
             dist = math.hypot(nccx - pacman.x, nccy - pacman.y)
-            # add small random factor for variety
             dist += random.random() * 20
             if dist < best_dist:
                 best_dist = dist
@@ -279,22 +354,18 @@ class Ghost:
         else:
             color = self.color
 
-        # body
         pygame.draw.circle(screen, color, (ix, iy - 3), r)
         pygame.draw.rect(screen, color, (ix - r, iy - 3, r * 2, r))
-        # wavy bottom
         for i in range(3):
             bx = ix - r + i * (r * 2 // 3) + r * 2 // 6
             pygame.draw.circle(screen, BLACK, (bx, iy - 3 + r), r // 4)
 
-        # eyes
         if not self.scared:
             for ex in (ix - r // 3, ix + r // 3):
                 pygame.draw.circle(screen, WHITE, (ex, iy - 5), r // 3)
                 ddx, ddy = self.direction
                 pygame.draw.circle(screen, BLUE, (ex + ddx * 2, iy - 5 + ddy * 2), r // 5)
         else:
-            # scared face
             for ex in (ix - r // 3, ix + r // 3):
                 pygame.draw.circle(screen, WHITE, (ex, iy - 5), r // 4)
 
@@ -311,6 +382,8 @@ class Game:
         self.clock = pygame.time.Clock()
         self.font = pygame.font.SysFont("arial", 20, bold=True)
         self.big_font = pygame.font.SysFont("arial", 36, bold=True)
+        self.title_font = pygame.font.SysFont("arial", 48, bold=True)
+        self.state = "start"  # start | playing | paused | dying | won | gameover
         self.reset()
 
     def reset(self):
@@ -325,9 +398,9 @@ class Game:
         self.score = 0
         self.lives = 3
         self.dots_left = sum(1 for r in self.maze for c in r if c in (0, 3))
-        self.state = "playing"  # playing | dying | won | gameover
-        self.death_timer = 0
+        self.death_frame = 0
         self.ghost_eat_combo = 0
+        self.ready_timer = 120  # brief "READY!" countdown after death/respawn
 
     def handle_input(self):
         for event in pygame.event.get():
@@ -335,23 +408,39 @@ class Game:
                 pygame.quit()
                 sys.exit()
             if event.type == pygame.KEYDOWN:
-                if self.state in ("won", "gameover"):
-                    if event.key == pygame.K_RETURN:
-                        self.reset()
+                if self.state == "start":
+                    if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                        self.state = "playing"
                     continue
-                if event.key == pygame.K_UP or event.key == pygame.K_w:
-                    self.pacman.set_direction(0, -1)
-                elif event.key == pygame.K_DOWN or event.key == pygame.K_s:
-                    self.pacman.set_direction(0, 1)
-                elif event.key == pygame.K_LEFT or event.key == pygame.K_a:
-                    self.pacman.set_direction(-1, 0)
-                elif event.key == pygame.K_RIGHT or event.key == pygame.K_d:
-                    self.pacman.set_direction(1, 0)
+
+                if self.state in ("won", "gameover"):
+                    if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                        self.reset()
+                        self.state = "playing"
+                    continue
+
+                if self.state == "paused":
+                    if event.key == pygame.K_p or event.key == pygame.K_ESCAPE:
+                        self.state = "playing"
+                    continue
+
+                if self.state == "playing":
+                    if event.key == pygame.K_p or event.key == pygame.K_ESCAPE:
+                        self.state = "paused"
+                        continue
+                    if event.key == pygame.K_UP or event.key == pygame.K_w:
+                        self.pacman.set_direction(0, -1)
+                    elif event.key == pygame.K_DOWN or event.key == pygame.K_s:
+                        self.pacman.set_direction(0, 1)
+                    elif event.key == pygame.K_LEFT or event.key == pygame.K_a:
+                        self.pacman.set_direction(-1, 0)
+                    elif event.key == pygame.K_RIGHT or event.key == pygame.K_d:
+                        self.pacman.set_direction(1, 0)
 
     def update(self):
         if self.state == "dying":
-            self.death_timer -= 1
-            if self.death_timer <= 0:
+            self.death_frame += 1
+            if self.death_frame >= DEATH_ANIM_FRAMES:
                 self.lives -= 1
                 if self.lives <= 0:
                     self.state = "gameover"
@@ -360,70 +449,121 @@ class Game:
                     for g in self.ghosts:
                         g.reset()
                     self.state = "playing"
+                    self.ready_timer = 120
             return
 
-        if self.state != "playing":
-            return
+        if self.state == "playing":
+            if self.ready_timer > 0:
+                self.ready_timer -= 1
+                return
 
-        self.pacman.update(self.maze)
+            self.pacman.update(self.maze)
 
-        # eat dots / power pellets
-        c, r = self.pacman.col, self.pacman.row
-        if 0 <= r < ROWS and 0 <= c < COLS:
-            cell = self.maze[r][c]
-            if cell == 0:
-                self.maze[r][c] = 2
-                self.score += 10
-                self.dots_left -= 1
-            elif cell == 3:
-                self.maze[r][c] = 2
-                self.score += 50
-                self.dots_left -= 1
-                self.ghost_eat_combo = 0
-                for g in self.ghosts:
-                    if not g.eaten:
-                        g.scared = True
-                        g.scared_timer = 360  # ~6 seconds
+            c, r = self.pacman.col, self.pacman.row
+            if 0 <= r < ROWS and 0 <= c < COLS:
+                cell = self.maze[r][c]
+                if cell == 0:
+                    self.maze[r][c] = 2
+                    self.score += 10
+                    self.dots_left -= 1
+                elif cell == 3:
+                    self.maze[r][c] = 2
+                    self.score += 50
+                    self.dots_left -= 1
+                    self.ghost_eat_combo = 0
+                    for g in self.ghosts:
+                        if not g.eaten:
+                            g.scared = True
+                            g.scared_timer = 360
 
-        if self.dots_left <= 0:
-            self.state = "won"
-            return
+            if self.dots_left <= 0:
+                self.state = "won"
+                return
 
-        for g in self.ghosts:
-            g.update(self.maze, self.pacman)
+            for g in self.ghosts:
+                g.update(self.maze, self.pacman)
 
-        # collision with ghosts
-        for g in self.ghosts:
-            if g.eaten:
-                continue
-            if math.hypot(self.pacman.x - g.x, self.pacman.y - g.y) < CELL * 0.7:
-                if g.scared:
-                    g.eaten = True
-                    self.ghost_eat_combo += 1
-                    self.score += 200 * self.ghost_eat_combo
-                else:
-                    self.state = "dying"
-                    self.death_timer = 60
-                    self.pacman.alive = False
+            for g in self.ghosts:
+                if g.eaten:
+                    continue
+                if math.hypot(self.pacman.x - g.x, self.pacman.y - g.y) < CELL * 0.7:
+                    if g.scared:
+                        g.eaten = True
+                        g.respawn_timer = GHOST_RESPAWN_TIME
+                        self.ghost_eat_combo += 1
+                        self.score += 200 * self.ghost_eat_combo
+                    else:
+                        self.state = "dying"
+                        self.death_frame = 0
+                        self.pacman.alive = False
 
     # ------------------------------------------------------------------
     # Drawing
     # ------------------------------------------------------------------
     def draw(self):
         self.screen.fill(BLACK)
+
+        if self.state == "start":
+            self._draw_start_screen()
+            pygame.display.flip()
+            return
+
         self._draw_maze()
         self._draw_dots()
         for g in self.ghosts:
             g.draw(self.screen)
-        self.pacman.draw(self.screen)
+
+        if self.state == "dying":
+            self.pacman.draw(self.screen, death_frame=self.death_frame)
+        else:
+            self.pacman.draw(self.screen)
+
         self._draw_hud()
 
-        if self.state == "won":
-            self._draw_overlay("YOU WIN!", YELLOW)
+        if self.state == "paused":
+            self._draw_overlay("PAUSED", WHITE, "Press P or ESC to resume")
+        elif self.state == "won":
+            self._draw_overlay("YOU WIN!", YELLOW, "Press ENTER or SPACE to restart")
         elif self.state == "gameover":
-            self._draw_overlay("GAME OVER", RED)
+            self._draw_overlay("GAME OVER", RED, "Press ENTER or SPACE to restart")
+        elif self.ready_timer > 0:
+            self._draw_overlay("READY!", YELLOW, "")
 
         pygame.display.flip()
+
+    def _draw_start_screen(self):
+        # animated pac-man logo
+        t = pygame.time.get_ticks()
+        mouth = abs(math.sin(t * 0.005)) * 40 + 5
+        cx, cy = WIDTH // 2, HEIGHT // 2 - 80
+        r = 40
+        pygame.draw.circle(self.screen, YELLOW, (cx, cy), r)
+        pygame.draw.polygon(self.screen, BLACK, [
+            (cx, cy),
+            (cx + int(r * math.cos(math.radians(-mouth))),
+             cy - int(r * math.sin(math.radians(-mouth)))),
+            (cx + int(r * math.cos(math.radians(mouth))),
+             cy - int(r * math.sin(math.radians(mouth)))),
+        ])
+
+        title = self.title_font.render("PAC-MAN", True, YELLOW)
+        self.screen.blit(title, title.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 20)))
+
+        # draw sample ghosts
+        gx = WIDTH // 2 - 70
+        for i, color in enumerate(GHOST_COLORS):
+            gr = 14
+            gix = gx + i * 40
+            giy = HEIGHT // 2 + 30
+            pygame.draw.circle(self.screen, color, (gix, giy - 3), gr)
+            pygame.draw.rect(self.screen, color, (gix - gr, giy - 3, gr * 2, gr))
+
+        if (t // 500) % 2 == 0:
+            hint = self.font.render("Press ENTER or SPACE to start", True, WHITE)
+            self.screen.blit(hint, hint.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 80)))
+
+        ctrl = self.font.render("Arrow Keys / WASD to move   P / ESC to pause", True, (150, 150, 150))
+        self.screen.blit(ctrl, ctrl.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 120)))
 
     def _draw_maze(self):
         for row in range(ROWS):
@@ -431,7 +571,6 @@ class Game:
                 if self.maze[row][col] == 1:
                     x, y = col * CELL, row * CELL + 40
                     pygame.draw.rect(self.screen, BLUE, (x, y, CELL, CELL))
-                    # inner darkening for style
                     pygame.draw.rect(self.screen, (15, 15, 100),
                                      (x + 2, y + 2, CELL - 4, CELL - 4), 1)
 
@@ -445,25 +584,23 @@ class Game:
                     pygame.draw.circle(self.screen, DOT_CLR, (cx, cy), 7)
 
     def _draw_hud(self):
-        # score
         txt = self.font.render(f"SCORE: {self.score}", True, WHITE)
         self.screen.blit(txt, (10, 8))
-        # lives
         for i in range(self.lives):
             pygame.draw.circle(self.screen, YELLOW, (WIDTH - 30 - i * 28, 20), 10)
-        # dots left
         txt2 = self.font.render(f"Dots: {self.dots_left}", True, DOT_CLR)
         self.screen.blit(txt2, (WIDTH // 2 - txt2.get_width() // 2, 8))
 
-    def _draw_overlay(self, message, color):
+    def _draw_overlay(self, message, color, hint_text):
         surf = self.big_font.render(message, True, color)
         rect = surf.get_rect(center=(WIDTH // 2, HEIGHT // 2))
         bg = pygame.Surface((rect.width + 40, rect.height + 20), pygame.SRCALPHA)
         bg.fill((0, 0, 0, 180))
         self.screen.blit(bg, (rect.x - 20, rect.y - 10))
         self.screen.blit(surf, rect)
-        hint = self.font.render("Press ENTER to restart", True, WHITE)
-        self.screen.blit(hint, hint.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 40)))
+        if hint_text:
+            hint = self.font.render(hint_text, True, WHITE)
+            self.screen.blit(hint, hint.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 40)))
 
     # ------------------------------------------------------------------
     # Main loop
