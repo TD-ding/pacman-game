@@ -12,7 +12,7 @@ import array
 # ---------------------------------------------------------------------------
 CELL = 28
 COLS = 21
-ROWS = 23
+ROWS = 22
 WIDTH = CELL * COLS
 HEIGHT = CELL * ROWS + 40  # extra space for HUD
 
@@ -581,7 +581,7 @@ class Fruit:
     def __init__(self, fruit_type=0):
         self.name, self.color, self.points = FRUIT_TYPES[fruit_type % len(FRUIT_TYPES)]
         self.col = 10
-        self.row = 11
+        self.row = 16
         self.x, self.y = cell_center(self.col, self.row)
         self.x = float(self.x)
         self.y = float(self.y)
@@ -650,9 +650,9 @@ class Game:
         self.pacman = PacMan(10, 16)
         self.ghosts = [
             Ghost(10, 9, 0),
-            Ghost(9, 9, 1),
-            Ghost(11, 9, 2),
-            Ghost(10, 7, 3),
+            Ghost(9, 8, 1),
+            Ghost(11, 8, 2),
+            Ghost(10, 8, 3),
         ]
         self.score = 0
         self.lives = 3
@@ -668,6 +668,10 @@ class Game:
 
     def _next_level(self):
         self.level += 1
+        if self.level > 10:
+            self.state = "won"
+            self.sfx.play('level_up')
+            return
         self.maze = [row[:] for row in MAZE_TEMPLATE]
         self.pacman.reset()
         for g in self.ghosts:
