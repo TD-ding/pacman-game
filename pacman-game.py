@@ -5,6 +5,7 @@ import pygame
 import sys
 import math
 import random
+import array
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -56,6 +57,52 @@ MAZE_TEMPLATE = [
     [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
     [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
 ]
+
+# ---------------------------------------------------------------------------
+# Sound FX
+# ---------------------------------------------------------------------------
+
+class SoundFX:
+    """Generates square-wave sound effects using pygame.mixer + array module."""
+
+    SR = 22050
+
+    def __init__(self):
+        self.enabled = False
+        self.sounds = {}
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init(frequency=self.SR, size=-16, channels=1, buffer=512)
+            self._generate()
+            self.enabled = True
+        except pygame.error:
+            pass
+
+    def _square(self, freq, dur, vol=0.3):
+        n = int(self.SR * dur)
+        buf = array.array('h')
+        amp = int(32767 * vol)
+        hp = self.SR / (2 * freq)
+        for i in range(n):
+            buf.append(amp if int(i / hp) % 2 == 0 else -amp)
+        return buf
+
+    def _generate(self):
+        # chomp – short blip when eating a dot
+        self.sounds['chomp'] = pygame.mixer.Sound(buffer=self._square(600, 0.05, 0.2))
+        # power – two-note ascending when eating a power pellet
+        buf = self._square(400, 0.08) + self._square(800, 0.08)
+        self.sounds['power'] = pygame.mixer.Sound(buffer=buf)
+        # death – descending tones
+        buf = self._square(500, 0.1) + self._square(400, 0.1) + self._square(300, 0.1) + self._square(200, 0.15)
+        self.sounds['death'] = pygame.mixer.Sound(buffer=buf)
+        # start – four-note ascending jingle
+        buf = self._square(523, 0.08) + self._square(659, 0.08) + self._square(784, 0.08) + self._square(1047, 0.12)
+        self.sounds['start'] = pygame.mixer.Sound(buffer=buf)
+
+    def play(self, name):
+        if self.enabled and name in self.sounds:
+            self.sounds[name].play()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -132,7 +179,7 @@ class PacMan:
         cx, cy = cell_center(self.col, self.row)
         dist_to_center = math.hypot(self.x - cx, self.y - cy)
 
-        if dist_to_center < PAC_SPEED + 0.5 and self.next_dir != (0, 0):
+        if dist_to_center < PAC_SPEED * 2 and self.next_dir != (0, 0):
             nc = self.col + self.next_dir[0]
             nr = self.row + self.next_dir[1]
             if is_passable(maze, nc, nr):
@@ -145,7 +192,7 @@ class PacMan:
 
         nc = self.col + dx
         nr = self.row + dy
-        if not is_passable(maze, nc, nr) and dist_to_center < PAC_SPEED + 0.5:
+        if not is_passable(maze, nc, nr) and dist_to_center < PAC_SPEED * 2:
             self.x, self.y = float(cx), float(cy)
             self.direction = (0, 0)
             return
@@ -376,6 +423,7 @@ class Ghost:
 
 class Game:
     def __init__(self):
+        pygame.mixer.pre_init(22050, -16, 1, 512)
         pygame.init()
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
         pygame.display.set_caption("Pac-Man")
@@ -383,6 +431,7 @@ class Game:
         self.font = pygame.font.SysFont("arial", 20, bold=True)
         self.big_font = pygame.font.SysFont("arial", 36, bold=True)
         self.title_font = pygame.font.SysFont("arial", 48, bold=True)
+        self.sfx = SoundFX()
         self.state = "start"  # start | playing | paused | dying | won | gameover
         self.reset()
 
@@ -411,12 +460,14 @@ class Game:
                 if self.state == "start":
                     if event.key in (pygame.K_RETURN, pygame.K_SPACE):
                         self.state = "playing"
+                        self.sfx.play('start')
                     continue
 
                 if self.state in ("won", "gameover"):
                     if event.key in (pygame.K_RETURN, pygame.K_SPACE):
                         self.reset()
                         self.state = "playing"
+                        self.sfx.play('start')
                     continue
 
                 if self.state == "paused":
@@ -466,6 +517,7 @@ class Game:
                     self.maze[r][c] = 2
                     self.score += 10
                     self.dots_left -= 1
+                    self.sfx.play('chomp')
                 elif cell == 3:
                     self.maze[r][c] = 2
                     self.score += 50
@@ -475,6 +527,7 @@ class Game:
                         if not g.eaten:
                             g.scared = True
                             g.scared_timer = 360
+                    self.sfx.play('power')
 
             if self.dots_left <= 0:
                 self.state = "won"
@@ -496,6 +549,7 @@ class Game:
                         self.state = "dying"
                         self.death_frame = 0
                         self.pacman.alive = False
+                        self.sfx.play('death')
 
     # ------------------------------------------------------------------
     # Drawing
@@ -575,13 +629,15 @@ class Game:
                                      (x + 2, y + 2, CELL - 4, CELL - 4), 1)
 
     def _draw_dots(self):
+        t = pygame.time.get_ticks() / 200.0
         for row in range(ROWS):
             for col in range(COLS):
                 cx, cy = cell_center(col, row)
                 if self.maze[row][col] == 0:
                     pygame.draw.circle(self.screen, DOT_CLR, (cx, cy), 3)
                 elif self.maze[row][col] == 3:
-                    pygame.draw.circle(self.screen, DOT_CLR, (cx, cy), 7)
+                    radius = int(5 + 3 * math.sin(t + col * 0.7 + row * 1.3))
+                    pygame.draw.circle(self.screen, DOT_CLR, (cx, cy), max(radius, 2))
 
     def _draw_hud(self):
         txt = self.font.render(f"SCORE: {self.score}", True, WHITE)
